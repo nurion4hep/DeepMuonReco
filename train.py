@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import ast
 import random
 from typing import Any
 from logging import getLogger
@@ -28,6 +29,67 @@ from deepmuonreco.utils.config import (
 _logger = getLogger(__name__)
 
 
+def safe_eval_arithmetic(expression: str):
+    """
+    Safely evaluate simple arithmetic expressions.
+    Only allows basic arithmetic operations and numeric literals.
+    Replaces the security-vulnerable eval() resolver.
+    """
+    # Parse the expression into an AST
+    try:
+        node = ast.parse(expression, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"Invalid expression syntax: {e}")
+    
+    def _eval_node(node):
+        if isinstance(node, ast.Expression):
+            return _eval_node(node.body)
+        elif isinstance(node, ast.Constant):  # Python 3.8+
+            if isinstance(node.value, (int, float)):
+                return node.value
+            else:
+                raise ValueError(f"Only numeric constants allowed, got {type(node.value)}")
+        elif isinstance(node, ast.Num):  # Python < 3.8 compatibility
+            return node.n
+        elif isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.USub):
+                return -_eval_node(node.operand)
+            elif isinstance(node.op, ast.UAdd):
+                return +_eval_node(node.operand)
+            else:
+                raise ValueError(f"Unsupported unary operator: {type(node.op)}")
+        elif isinstance(node, ast.BinOp):
+            left = _eval_node(node.left)
+            right = _eval_node(node.right)
+            
+            if isinstance(node.op, ast.Add):
+                return left + right
+            elif isinstance(node.op, ast.Sub):
+                return left - right
+            elif isinstance(node.op, ast.Mult):
+                return left * right
+            elif isinstance(node.op, ast.Div):
+                if right == 0:
+                    raise ValueError("Division by zero")
+                return left / right
+            elif isinstance(node.op, ast.FloorDiv):
+                if right == 0:
+                    raise ValueError("Division by zero")
+                return left // right
+            elif isinstance(node.op, ast.Mod):
+                if right == 0:
+                    raise ValueError("Modulo by zero")
+                return left % right
+            elif isinstance(node.op, ast.Pow):
+                return left ** right
+            else:
+                raise ValueError(f"Unsupported binary operator: {type(node.op)}")
+        else:
+            raise ValueError(f"Unsupported node type: {type(node)}")
+    
+    return _eval_node(node.body)
+
+
 OmegaConf.register_new_resolver(
     name='slug',
     resolver=lambda pattern = 2: generate_slug(pattern=pattern),
@@ -37,7 +99,7 @@ OmegaConf.register_new_resolver(
 
 OmegaConf.register_new_resolver(
     name='eval',
-    resolver=eval,
+    resolver=safe_eval_arithmetic,
     replace=True,
 )
 
