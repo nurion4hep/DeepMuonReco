@@ -155,10 +155,22 @@ class PerceiverBasicDecoder(nn.Module):
     ) -> Tensor:
         """
         """
+        # Construct attention mask from query_data_mask if provided
+        attn_mask = None
+        if query_data_mask is not None:
+            # query_data_mask: (batch, query_len) -> attn_mask: (batch, query_len, latent_len)
+            # Attention mask: True for positions to mask (i.e., padding)
+            query_mask = query_data_mask == 0
+            latent_len = latent.size(1)
+            attn_mask = eo.repeat(
+                tensor=query_mask,
+                pattern='n q -> n q l',
+                l=latent_len,
+            )
         output: Tensor = self.attention(
             target=query,
             source=latent,
-            attn_mask=None, # FIXME:
+            attn_mask=attn_mask,
         )
         output = self.mlp(
             input=output,
