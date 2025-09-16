@@ -97,7 +97,7 @@ class HiPBlock(nn.Module):
         G = self.num_groups
 
         # NOTE: padding
-        pad_size = G - (L % G)
+        pad_size = (G - (L % G)) % G
 
         if pad_size != 0:
             # pad: (left, right, top, bottom, front, back)
