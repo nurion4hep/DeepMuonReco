@@ -22,3 +22,27 @@ source setup.fish
 aim up --port <PORT>
 ```
 If you are working on a remote server, you need to set up port forwarding
+
+## Development
+
+### Code Quality
+
+This project uses [Ruff](https://github.com/astral-sh/ruff) for code linting and formatting. 
+
+To run linting locally:
+```bash
+pip install ruff
+ruff check .
+```
+
+To run formatting checks:
+```bash
+ruff format --check .
+```
+
+To automatically fix formatting issues:
+```bash
+ruff format .
+```
+
+The linting and formatting checks are automatically run in GitHub Actions on all pull requests.
