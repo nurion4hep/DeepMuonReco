@@ -31,10 +31,12 @@ class LatentAttentionModel(nn.Module):
         decoder_num_layers: int,
         dropout_p: float = 0.1,
         widening_factor: int = 4,
+        latent_init: str = "normal",
     ) -> None:
         """
         Args:
             latent_len: number of latent vectors in the encoder for muon detector system measurement embeddings
+            latent_init: Initialization method for PerceiverEncoder latent parameters
         """
         super().__init__()
 
@@ -52,6 +54,7 @@ class LatentAttentionModel(nn.Module):
             widening_factor=widening_factor,
             dropout_p=dropout_p,
             bias=True,
+            latent_init=latent_init,
         )
 
         self.muon_det_encoder = PerceiverEncoder(
@@ -62,6 +65,7 @@ class LatentAttentionModel(nn.Module):
             widening_factor=widening_factor,
             dropout_p=dropout_p,
             bias=True,
+            latent_init=latent_init,
         )
 
         self.encoder = TransformerDecoder(

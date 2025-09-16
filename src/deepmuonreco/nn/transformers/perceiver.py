@@ -30,12 +30,31 @@ class PerceiverEncoder(nn.Module):
         input_dim: int | None = None,
         dropout_p: float = 0,
         bias: bool = False,
+        latent_init: str = "normal",
     ) -> None:
         """
+        Args:
+            latent_len: Number of latent vectors
+            latent_dim: Dimension of each latent vector
+            num_heads: Number of attention heads
+            use_post_attention_residual: Whether to use post-attention residual connection
+            widening_factor: MLP widening factor
+            input_dim: Input dimension (if different from latent_dim)
+            dropout_p: Dropout probability
+            bias: Whether to use bias in attention layers
+            latent_init: Initialization method for latent parameters. Options:
+                - "normal": Standard normal distribution (default, backward compatible)
+                - "xavier_uniform": Xavier/Glorot uniform initialization
+                - "xavier_normal": Xavier/Glorot normal initialization  
+                - "kaiming_uniform": Kaiming/He uniform initialization
+                - "kaiming_normal": Kaiming/He normal initialization
+                - "truncated_normal": Truncated normal distribution (std=0.02)
+                - "zeros": Initialize to zeros
         """
         super().__init__()
 
-        self.latent = nn.Parameter(data=torch.randn(latent_len, latent_dim))
+        self.latent = nn.Parameter(data=torch.empty(latent_len, latent_dim))
+        self._initialize_latent(latent_init)
 
         self.attention = CrossAttentionBlock(
             embed_dim=latent_dim,
@@ -53,6 +72,32 @@ class PerceiverEncoder(nn.Module):
             widening_factor=widening_factor,
             dropout_p=dropout_p,
         )
+
+    def _initialize_latent(self, init_method: str) -> None:
+        """Initialize the latent parameter tensor using the specified method."""
+        with torch.no_grad():
+            if init_method == "normal":
+                # Standard normal distribution (backward compatible)
+                nn.init.normal_(self.latent, mean=0.0, std=1.0)
+            elif init_method == "xavier_uniform":
+                nn.init.xavier_uniform_(self.latent)
+            elif init_method == "xavier_normal": 
+                nn.init.xavier_normal_(self.latent)
+            elif init_method == "kaiming_uniform":
+                nn.init.kaiming_uniform_(self.latent, mode='fan_in')
+            elif init_method == "kaiming_normal":
+                nn.init.kaiming_normal_(self.latent, mode='fan_in')
+            elif init_method == "truncated_normal":
+                # Truncated normal with smaller std for more stable training
+                nn.init.trunc_normal_(self.latent, mean=0.0, std=0.02, a=-2*0.02, b=2*0.02)
+            elif init_method == "zeros":
+                nn.init.zeros_(self.latent)
+            else:
+                raise ValueError(
+                    f"Unknown latent initialization method: {init_method}. "
+                    f"Supported methods: normal, xavier_uniform, xavier_normal, "
+                    f"kaiming_uniform, kaiming_normal, truncated_normal, zeros"
+                )
 
     def forward(
         self,

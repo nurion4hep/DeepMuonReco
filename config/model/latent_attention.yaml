@@ -6,6 +6,7 @@ encoder_num_layers: 4
 decoder_num_layers: 4
 widening_factor: 4
 dropout_p: 0.01
+latent_init: normal  # Options: normal, xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, truncated_normal, zeros
 
 
 module:
@@ -24,6 +25,7 @@ module:
   decoder_num_layers: ${model.decoder_num_layers}
   widening_factor: ${model.widening_factor}
   dropout_p: ${model.dropout_p}
+  latent_init: ${model.latent_init}
 
 
 in_keys:

@@ -38,6 +38,7 @@ class HiPBlock(nn.Module):
         processor_num_heads: int,
         processor_widening_factor: int,
         dropout_p: float = 0,
+        latent_init: str = "normal",
     ) -> None:
         """
         """
@@ -66,6 +67,7 @@ class HiPBlock(nn.Module):
             widening_factor=encoder_widening_factor,
             input_dim=input_dim,
             dropout_p=dropout_p,
+            latent_init=latent_init,
         )
 
         processor = PerceiverProcessor(
@@ -148,6 +150,7 @@ class HiPBlockSequential(nn.Module):
         # NOTE: encoder
         encoder_num_heads: list[int] | None = None,
         encoder_widening_factor: list[int] | None = None,
+        latent_init: str = "normal",
     ) -> None:
         super().__init__()
 
@@ -178,7 +181,7 @@ class HiPBlockSequential(nn.Module):
 
         # HiP's encoder
         self.block_list = nn.ModuleList([
-            HiPBlock(**kwargs) for kwargs in kwargs_list
+            HiPBlock(**kwargs, latent_init=latent_init) for kwargs in kwargs_list
         ])
 
 
@@ -199,6 +202,7 @@ class HiPEncoder(HiPBlockSequential):
         encoder_num_heads: list[int] | None = None,
         encoder_widening_factor: list[int] | None = None,
         return_hidden: bool = True,
+        latent_init: str = "normal",
     ) -> None:
         """
         """
@@ -212,6 +216,7 @@ class HiPEncoder(HiPBlockSequential):
             processor_widening_factor,
             encoder_num_heads,
             encoder_widening_factor,
+            latent_init,
         )
 
         self.return_hidden = return_hidden
