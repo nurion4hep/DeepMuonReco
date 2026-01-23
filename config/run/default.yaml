@@ -9,3 +9,7 @@ test: true
 predict: false
 
 seed: null
+
+# Resume training from checkpoint
+resume:
+  ckpt_path: null  # Path to checkpoint file to resume from (e.g., logs/exp_name/run_name/checkpoints/last.ckpt)

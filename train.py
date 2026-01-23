@@ -118,7 +118,10 @@ def main(config: DictConfig):
         _logger.info(f'Skipping pre-fit validation as per {config.run.pre_fit_validation=}')
 
     if config.run.fit:
-        trainer.fit(model=model, datamodule=datamodule)
+        ckpt_path = config.run.resume.ckpt_path
+        if ckpt_path:
+            _logger.info(f'Resuming training from checkpoint: {ckpt_path}')
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
     else:
         _logger.info(f'Skipping training as per {config.run.fit=}')
 

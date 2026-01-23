@@ -29,6 +29,19 @@ For example:
 ./train.py model=latent_attention model.model_dim=128 optimizer.lr=0.0001 datamodule.batch_size=256
 ```
 
+### Resume training from checkpoint
+To resume training from a previously saved checkpoint, specify the checkpoint path:
+```bash
+./train.py run.resume.ckpt_path=logs/exp_name/run_name/checkpoints/last.ckpt
+```
+
+This will restore the model weights, optimizer state, learning rate scheduler, and training epoch from the checkpoint and continue training from where it left off.
+
+You can also resume from the best checkpoint:
+```bash
+./train.py run.resume.ckpt_path=logs/exp_name/run_name/checkpoints/epoch=000042_validate-loss=0.123456.ckpt
+```
+
 ### Submit training job into a cluster
 ```bash
 ./submit.py -h
