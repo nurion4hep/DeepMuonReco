@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 from pathlib import Path
 import argparse
-import hydra
 from hydra.utils import instantiate
 import torch
+from omegaconf import OmegaConf
 from muonly.callbacks import PredictionWriter
 
 
@@ -18,13 +18,7 @@ def run(ckpt_file_path: Path, gpu_id: int):
         raise FileNotFoundError(f"Log directory {log_dir_path} does not exist!")
     print(f"{log_dir_path=}")
 
-    # NOTE: config_path in initialize() must be relative
-    log_dir_rel = log_dir_path.relative_to(Path.cwd())
-    hydra.initialize(
-        config_path=str(log_dir_rel),
-        version_base=None,
-    )
-    config = hydra.compose(config_name="config")
+    config = OmegaConf.load(log_dir_path / "config.yaml")
 
     device = torch.device(f"cuda:{gpu_id}")
 
@@ -56,7 +50,7 @@ def run(ckpt_file_path: Path, gpu_id: int):
 
     config.trainer.enable_progress_bar = True
     print("instantiating trainer...")
-    trainer = hydra.utils.instantiate(config.trainer)(callbacks=callbacks)
+    trainer = instantiate(config.trainer)(callbacks=callbacks)
 
     print("starting prediction...")
     trainer.predict(model=model, datamodule=datamodule)
