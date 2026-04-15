@@ -1,10 +1,36 @@
 #!/usr/bin/env python
+import os
 from pathlib import Path
+import secrets
 import argparse
 import hydra
 from hydra.utils import instantiate
 import torch
+from omegaconf import OmegaConf
+from coolname.impl import generate_slug
 from muonly.callbacks import PredictionWriter
+
+
+if "PROJECT_ROOT" not in os.environ:
+    os.environ["PROJECT_ROOT"] = str(Path(__file__).parent.resolve())
+
+
+OmegaConf.register_new_resolver(
+    "slug",
+    lambda pattern=2: generate_slug(pattern=pattern),
+    use_cache=True,
+    replace=True,
+)
+
+OmegaConf.register_new_resolver(
+    name="len",
+    resolver=len,
+)
+
+OmegaConf.register_new_resolver(
+    name="randbits",
+    resolver=secrets.randbits,
+)
 
 
 def run(ckpt_file_path: Path, gpu_id: int):
