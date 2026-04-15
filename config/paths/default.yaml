@@ -1,4 +1,5 @@
 root_dir: ${oc.env:PROJECT_ROOT}
+data_dir: ${oc.env:DATA_DIR}
 log_dir: ${paths.root_dir}/logs/
 run_dir: ${paths.log_dir}/${exp.name}/${run.name}
 work_dir: ${hydra:runtime.cwd}
