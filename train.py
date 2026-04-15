@@ -2,7 +2,6 @@
 import logging
 from pathlib import Path
 import warnings
-import secrets
 import os
 from aim.pytorch_lightning import AimLogger
 import hydra
@@ -10,13 +9,12 @@ from hydra.utils import instantiate
 import torch
 from lightning.pytorch import LightningDataModule, Trainer
 from lightning import seed_everything
-from omegaconf import DictConfig
-from omegaconf import OmegaConf
-from coolname.impl import generate_slug
+from omegaconf import DictConfig, OmegaConf
 from tqdm import TqdmExperimentalWarning
 import mplhep as mh
 from muonly.nn.utils import init_params
 from muonly.utils.logging import log_everything
+from muonly.utils.resolvers import register_resolvers
 
 mh.style.use("CMS")
 
@@ -32,22 +30,7 @@ for logger_name in ["lightning", "matplotlib", "PIL", "aim", "filelock", "fsspec
 
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
-OmegaConf.register_new_resolver(
-    "slug",
-    lambda pattern=2: generate_slug(pattern=pattern),
-    use_cache=True,
-    replace=True,
-)
-
-OmegaConf.register_new_resolver(
-    name="len",
-    resolver=len,
-)
-
-OmegaConf.register_new_resolver(
-    name="randbits",
-    resolver=secrets.randbits,
-)
+register_resolvers()
 
 
 @hydra.main(

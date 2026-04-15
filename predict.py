@@ -5,6 +5,9 @@ import hydra
 from hydra.utils import instantiate
 import torch
 from muonly.callbacks import PredictionWriter
+from muonly.utils.resolvers import register_resolvers
+
+register_resolvers()
 
 
 def run(ckpt_file_path: Path, gpu_id: int):
