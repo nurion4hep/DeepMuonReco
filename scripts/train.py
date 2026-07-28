@@ -7,6 +7,7 @@ from typing import Any
 from contextlib import nullcontext
 import secrets
 import sys
+import json
 
 import torch
 from torch import Tensor
@@ -18,8 +19,12 @@ from torch.utils.data import DataLoader
 
 from tensordict.nn import TensorDictModule
 
-from torchmetrics.aggregation import MeanMetric
-from torchmetrics.classification import BinaryAUROC
+from torchmetrics import MetricCollection
+from torchmetrics.aggregation import CatMetric, MeanMetric
+from torchmetrics.classification import (
+    BinaryAUROC,
+    BinaryROC,
+)
 
 import torchinfo
 
@@ -50,6 +55,13 @@ from muonly.callbacks import MemoryTracker
 from muonly.callbacks import CUDAMemoryTracker
 from muonly.callbacks import TrackerCollection
 from muonly.utils.reproducibility import set_seed
+from muonly.utils.logging import is_json_serializable
+from muonly.utils.plot import Efficiency, save_figure
+from muonly.utils.sdpa import sdpa_kernel_context
+from muonly.nn.metrics import (
+    binary_specificity_at_sensitivity_metric,
+    validate_binary_metric_inputs,
+)
 
 mh.style.use("CMS")
 
@@ -114,37 +126,40 @@ class GlobalState:
 #
 # ===============================================================================
 
-def compute_loss(batch, criterion, config: DictConfig) -> Tensor:
+
+def compute_loss(batch, criterion, aux_terms: nn.ModuleList) -> dict[str, Tensor]:
+    """Compute the total training loss and its components.
+
+    The base criterion is averaged over all valid tracks. Each auxiliary term
+    is evaluated on the same masked logits/target and added to the total with
+    its own ``weight``. Returns a dict with ``loss`` (total, for backward),
+    ``loss_base``, and one ``loss_<name>`` entry per auxiliary term.
+    """
     mask = batch["tracker_track_data_mask"]
-    logits = batch["logits"]
-    target = batch["target"].float()
-    pt = batch["tracker_track_pt"]
+    logits = batch["logits"][mask]
+    target = batch["target"][mask].float()
 
-    if config.balancing is not None:
-        if config.balancing.type == "pt_bin":
-            # Compute the loss within each pt bin defined by consecutive
-            # edges in ``config.pt_edges`` and average over the bins, so that
-            # every pt range contributes equally regardless of its population.
-            # Use ``.inf`` as the final edge to cover the high-pt tail.
-            pt_edges = config.balancing.edges
-            loss_list = []
-            for pt_low, pt_high in zip(pt_edges[:-1], pt_edges[1:]):
-                bin_mask = mask & (pt > pt_low) & (pt <= pt_high)
-                loss_list.append(criterion(input=logits[bin_mask], target=target[bin_mask]).mean())
-            loss = torch.stack(loss_list).mean()
-        else:
-            raise ValueError(f"Unsupported loss balancing type: {config.balancing.type}")
-    else:
-        logits = batch["logits"][mask]
-        target = batch["target"][mask].float()
-        loss = criterion(input=logits, target=target)
+    base_loss = criterion(input=logits, target=target).mean()
 
-    return loss
+    components = {"loss_base": base_loss}
+    total = base_loss
+    for term in aux_terms:
+        value = term(input=logits, target=target)
+        components[f"loss_{term.name}"] = value
+        total = total + term.weight * value
+    components["loss"] = total
+    return components
+
+
+# ===============================================================================
+#
+# ===============================================================================
 
 
 def train(
     model,
     criterion: nn.Module,
+    aux_terms: nn.ModuleList,
     data_loader: DataLoader,
     optimizer: AdamW,
     lr_scheduler: SequentialLR,
@@ -168,12 +183,14 @@ def train(
 
         with amp_context:
             batch = model(batch)
-            loss = compute_loss(batch=batch, criterion=criterion, config=config.loss)
+            loss_dict = compute_loss(
+                batch=batch, criterion=criterion, aux_terms=aux_terms
+            )
+            loss = loss_dict["loss"]
 
         loss.backward()
         clip_grad_norm_(
-            parameters=model.parameters(),
-            max_norm=config.optim.max_grad_norm
+            parameters=model.parameters(), max_norm=config.optim.max_grad_norm
         )
         optimizer.step()
         optimizer.zero_grad()
@@ -182,12 +199,19 @@ def train(
         global_state.step += 1
 
         aim_run.track(
-            value=loss.float().item(),
-            name="loss",
+            value={
+                **{key: value.float().item() for key, value in loss_dict.items()},
+                "lr": lr_scheduler.get_last_lr()[0],
+            },
             epoch=global_state.epoch,
             step=global_state.step,
             context={"subset": "train"},
         )
+
+
+# ===============================================================================
+#
+# ===============================================================================
 
 
 @torch.inference_mode()
@@ -212,12 +236,14 @@ def validate(
         "loss": MeanMetric(),
         "loss_pt_0p5_3": MeanMetric(),
         "loss_pt_3_inf": MeanMetric(),
-        "auroc_pt_3_inf": BinaryAUROC(thresholds=1_000),
-        "auroc_pt_30_inf": BinaryAUROC(thresholds=1_000),
     }
 
     h_sig = Hist.new.Reg(40, 0, 1).Double()
     h_bkg = h_sig.copy()
+
+    # specificity = true negative rate = background rejection rate
+    # sensitivity = true positive rate = signal efficiency
+    sas_metric = binary_specificity_at_sensitivity_metric(min_sensitivity=0.9999)
 
     # ---------------------------------------------------------------------------
     #
@@ -237,37 +263,40 @@ def validate(
             preds = logits.sigmoid()
             loss = criterion(input=logits, target=target)
 
+        # -----------------------------------------------------------------------
+        #
+        # -----------------------------------------------------------------------
+        batch = batch.cpu()
         loss = loss.float().cpu()
         preds = preds.float().cpu()
         target = target.long().cpu()
-        pt = batch["tracker_track_pt"][mask].float().cpu()
+        mask = mask.cpu()
+        pt = batch["tracker_track_pt"][mask].float()
 
         mask_pt_0p5_3 = (pt > 0.5) & (pt <= 3)
-        mask_pt_3_inf = (pt > 3)
-        mask_pt_30_inf = (pt > 30)
+        mask_pt_3_inf = pt > 3
 
         metric_dict["loss"].update(loss)
         metric_dict["loss_pt_0p5_3"].update(loss[mask_pt_0p5_3])
         metric_dict["loss_pt_3_inf"].update(loss[mask_pt_3_inf])
-        metric_dict["auroc_pt_3_inf"].update(preds=preds[mask_pt_3_inf], target=target[mask_pt_3_inf])
-        metric_dict["auroc_pt_30_inf"].update(preds=preds[mask_pt_30_inf], target=target[mask_pt_30_inf])
+
+        validate_binary_metric_inputs(preds=preds, target=target)
+        sas_metric.update(preds=preds, target=target)
 
         # numpy
         sig_mask = target == 1
         bkg_mask = torch.logical_not(sig_mask)
 
-        target = target.numpy()
-        preds = preds.numpy()
-
-        h_sig.fill(preds[sig_mask])
-        h_bkg.fill(preds[bkg_mask])
-
-
+        h_sig.fill(preds[sig_mask].numpy())
+        h_bkg.fill(preds[bkg_mask].numpy())
 
     # ---------------------------------------------------------------------------
     #
     # ---------------------------------------------------------------------------
-    result = {name: metric.compute().item() for name, metric in metric_dict.items()}
+    result: dict[str, Any] = {
+        name: metric.compute().item() for name, metric in metric_dict.items()
+    }
+    result["tnr_at_tpr_0p9999"] = sas_metric.compute()[0].item()
 
     # NOTE:
     fig, ax = plt.subplots()
@@ -277,35 +306,186 @@ def validate(
     ax.set_xlabel("Score")
     ax.set_ylabel("Density")
     ax.legend()
-    result["dist_score"] = fig
+    result["dist_score"] = Image(fig)
 
     return result
 
 
-def compute_pos_weight(dataset: TrackerTrackSelectionDataset, config) -> torch.Tensor:
+@torch.inference_mode()
+def evaluate(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    config: DictConfig,
+    amp_context: torch.autocast | nullcontext,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """ """
+    # ---------------------------------------------------------------------------
+    #
+    # ---------------------------------------------------------------------------
+    model.eval()
+
+    # ---------------------------------------------------------------------------
+    # Metrics and histogram setup
+    # ---------------------------------------------------------------------------
+    label_cat = CatMetric()
+    score_cat = CatMetric()
+    pt_cat = CatMetric()
+    roc_metric_collection = MetricCollection(
+        {
+            "roc": BinaryROC(thresholds=None, compute_on_cpu=True),
+            "auroc": BinaryAUROC(thresholds=None, compute_on_cpu=True),
+        },
+        compute_groups=True,
+    )
+
+    # ---------------------------------------------------------------------------
+    #
+    # ---------------------------------------------------------------------------
+
+    for batch in tqdm.rich.tqdm(
+        data_loader, desc="Evaluating", disable=(not config.misc.tqdm)
+    ):
+        batch = batch.to(device)
+
+        with amp_context:
+            batch = model(batch)
+
+            mask = batch["tracker_track_data_mask"]
+            logits = batch["logits"][mask]
+            labels = batch["target"][mask].float()
+            pt = batch["tracker_track_pt"][mask].float()
+            scores = logits.sigmoid()
+
+        # -----------------------------------------------------------------------
+        #
+        # -----------------------------------------------------------------------
+        labels = labels.long().cpu()
+        scores = scores.float().cpu()
+        pt = pt.float().cpu()
+
+        batch = batch.cpu()
+        label_cat.update(labels)
+        score_cat.update(scores)
+        pt_cat.update(pt)
+        roc_metric_collection.update(preds=scores.double(), target=labels.long())
+
+    ############################################################################
+    #
+    ############################################################################
+
+    result: dict[str, Any] = {}
+
+    # ---------------------------------------------------------------------------
+    #
+    # ---------------------------------------------------------------------------
+    roc_result = roc_metric_collection.compute()
+    fpr, tpr, thresholds = roc_result["roc"]
+    tnr = 1 - fpr
+
+    result["auroc"] = roc_result["auroc"].item()
+
+    sas_result = []
+    tpr_to_threshold = {}
+    for each in [0.99, 0.999, 0.9999, 0.99999]:
+        idx = torch.argmin(torch.abs(tpr - each))
+        sas_result.append(
+            {
+                "tpr_requested": each,  # requested TPR. the actual TPR may not be exactly equal to this value
+                "tpr": tpr[idx].item(),  # actual TPR at the threshold
+                "tnr": tnr[idx].item(),
+                "threshold": thresholds[idx].item(),
+            }
+        )
+        tpr_to_threshold[each] = thresholds[idx].item()
+
+    with open(output_dir / "sas.json", "w") as file:
+        json.dump(sas_result, file, indent=4)
+
+    # ---------------------------------------------------------------------------
+    # ROC curve
+    # ---------------------------------------------------------------------------
+    fig, ax = plt.subplots()
+    ax.plot(tpr.numpy(), tnr.numpy(), label=f"AUC = {result['auroc']:.4f}")
+    ax.set_xlabel(r"Signal Efficiency, $\epsilon_{sig}$")
+    ax.set_ylabel(r"Background Rejection Rate, $1 - \epsilon_{bkg}$")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend()
+    fig.tight_layout()
+    save_figure(fig=fig, path=output_dir / "roc")
+    result["roc"] = Image(fig)
+
+    # ---------------------------------------------------------------------------
+    # Efficiency / rejection vs pT
+    # ---------------------------------------------------------------------------
+    y_true = label_cat.compute()
+    y_score = score_cat.compute()
+    pt = pt_cat.compute().numpy()
+
+    sig_mask = (y_true == 1).numpy()
+    bkg_mask = ~sig_mask
+    pass_mask = (y_score > tpr_to_threshold[0.9999]).numpy()
+
+    # ---------------------------------------------------------------------------
+    # signal efficiency vs pT (full range + low-pt zoom)
+    # ---------------------------------------------------------------------------
+    h_den = Hist.new.Reg(100, 0, 100).Double()
+    h_num = h_den.copy()
+    h_den.fill(pt[sig_mask])
+    h_num.fill(pt[sig_mask & pass_mask])
+
+    eff = Efficiency.from_hist(h_num=h_num, h_den=h_den)
+
+    fig, ax = plt.subplots()
+    eff.plot(ax=ax, ls=":", marker="s", label="New Model")
+    ax.axhline(1, color="gray", ls=":")
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0.99, 1.001)
+    ax.set_xlabel(r"Tracker Track $p_{T}$ [GeV]")
+    ax.set_ylabel(r"Signal Tracker Track Efficiency, $\epsilon_{sig}$")
+    ax.legend(title=r"$\epsilon_{sig}$=99.99%, Validation Set")
+    fig.tight_layout()
+    save_figure(fig=fig, path=output_dir / "eff_pt")
+    result["eff_pt"] = Image(fig)
+
+    # ---------------------------------------------------------------------------
+    # background rejection vs pT (full range)
+    # ---------------------------------------------------------------------------
+    h_den = Hist.new.Reg(100, 0, 100).Double()
+    h_num = h_den.copy()
+    h_den.fill(pt[bkg_mask])
+    h_num.fill(pt[bkg_mask & ~pass_mask])
+
+    rej = Efficiency.from_hist(h_num=h_num, h_den=h_den)
+
+    fig, ax = plt.subplots()
+    rej.plot(ax=ax, ls=":", marker="s", label="New Model")
+    ax.axhline(1, color="gray", ls=":")
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 1.001)
+    ax.set_xlabel(r"Tracker Track $p_{T}$ [GeV]")
+    ax.set_ylabel(r"Background Tracker Track Rejection Rate, $1 - \epsilon_{bkg}$")
+    ax.legend(title=r"$\epsilon_{sig}$=99.99%, Validation Set")
+    fig.tight_layout()
+    save_figure(fig=fig, path=output_dir / "rej_bkg_pt")
+    result["rej_bkg_pt"] = Image(fig)
+
+    return result
+
+
+# ===============================================================================
+#
+# ===============================================================================
+
+
+def compute_pos_weight(dataset: TrackerTrackSelectionDataset) -> Tensor:
     pos_count = 0
     neg_count = 0
 
-    balancing = config.loss.balancing
-
     for example in tqdm.rich.tqdm(dataset, desc="Computing pos_weight"):
         target = example["target"]
-
-        if balancing is not None:
-            pt = example["tracker_track_pt"]
-            if balancing.type == "pt_mask":
-                # Only tracks above ``pt_min`` enter the loss, so restrict the
-                # positive/negative count to the same region.
-                mask = pt > balancing.pt_min
-            elif balancing.type == "pt_bin":
-                # The loss only covers tracks within the pt bin range, so count
-                # over the union of the bins defined by ``edges``.
-                edges = balancing.edges
-                mask = (pt > edges[0]) & (pt <= edges[-1])
-            else:
-                raise ValueError(f"Unsupported loss balancing type: {balancing.type}")
-
-            target = target[mask]
 
         pos = target.long().sum().item()
         total = target.numel()
@@ -404,6 +584,11 @@ def run(
         torch.set_num_interop_threads(config.torch.num_interop_threads)
 
     set_seed(config.torch.seed)
+
+    # Validate backend selection before allocating datasets and model state.
+    with sdpa_kernel_context(device, config.torch.sdpa_backend):
+        pass
+    _logger.info(f"SDPA backend: {config.torch.sdpa_backend}")
 
     # ---------------------------------------------------------------------------
     # Instantiate model
@@ -510,7 +695,7 @@ def run(
     # criterion
     # ---------------------------------------------------------------------------
     if config.loss.pos_weight == "auto":
-        pos_weight = compute_pos_weight(train_set, config)
+        pos_weight = compute_pos_weight(train_set)
     elif isinstance(config.loss.pos_weight, (int, float)):
         pos_weight = torch.tensor(config.loss.pos_weight)
     else:
@@ -518,12 +703,14 @@ def run(
 
     _logger.info(f"Positive weight: {pos_weight.item():.4f}")
 
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=pos_weight,
-        reduction="none",
+    criterion = instantiate(config.loss.criterion, pos_weight=pos_weight)
+
+    aux_terms = nn.ModuleList(
+        instantiate(aux_config) for aux_config in (config.loss.get("aux") or [])
     )
 
     _logger.info(f"{criterion=}")
+    _logger.info(f"{aux_terms=}")
 
     # ---------------------------------------------------------------------------
     # Optimization
@@ -559,6 +746,7 @@ def run(
 
     model = model.to(device)
     criterion = criterion.to(device)
+    aux_terms = aux_terms.to(device)
 
     trackers.track("after_move_to_device")
 
@@ -606,48 +794,50 @@ def run(
         _logger.info(f"Starting epoch {epoch}/{config.optim.max_epochs}...")
         global_state.epoch = epoch
 
+        aim_run.track(value=epoch, name='epoch', step=global_state.step, epoch=global_state.epoch)
+
         if epoch >= 1:
             _logger.info("Running training...")
-            train(
-                model=td_model,
-                criterion=criterion,
-                data_loader=train_loader,
-                optimizer=optimizer,
-                lr_scheduler=lr_scheduler,
-                device=device,
-                global_state=global_state,
-                aim_run=aim_run,
-                config=config,
-                amp_context=amp_context,
-            )
+            with sdpa_kernel_context(device, config.torch.sdpa_backend):
+                train(
+                    model=td_model,
+                    criterion=criterion,
+                    aux_terms=aux_terms,
+                    data_loader=train_loader,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    device=device,
+                    global_state=global_state,
+                    aim_run=aim_run,
+                    config=config,
+                    amp_context=amp_context,
+                )
             _logger.info("Training completed.")
             trackers.track(f"epoch_{epoch:06d}_train")
 
         _logger.info("Running validation...")
-        val_result = validate(
-            model=td_model,
-            criterion=criterion,
-            data_loader=val_loader,
-            device=device,
-            config=config,
-            amp_context=amp_context,
-        )
+        with sdpa_kernel_context(device, config.torch.sdpa_backend):
+            val_result = validate(
+                model=td_model,
+                criterion=criterion,
+                data_loader=val_loader,
+                device=device,
+                config=config,
+                amp_context=amp_context,
+            )
         _logger.info("Validation completed.")
         trackers.track(f"epoch_{epoch:06d}_val")
 
         _logger.debug(
             f"Logging validation results to Aim and checkpointing if necessary..."
         )
-        for key, value in val_result.items():
-            if isinstance(value, plt.Figure):
-                value = Image(value)
-            aim_run.track(
-                value=value,
-                name=key,
-                epoch=global_state.epoch,
-                step=global_state.step,
-                context={"subset": "val"},
-            )
+
+        aim_run.track(
+            value=val_result,
+            epoch=global_state.epoch,
+            step=global_state.step,
+            context={"subset": "val"},
+        )
         plt.close("all")
         model_checkpoint.step(metric=val_result)
         _logger.info(f"{global_state}: {val_result}")
@@ -662,35 +852,53 @@ def run(
     # Load best checkpoint
     # ---------------------------------------------------------------------------
 
-    checkpoint = torch.load(model_checkpoint.best_path)
+    checkpoint = torch.load(
+        model_checkpoint.best_path, map_location=device, weights_only=False
+    )
     model.load_state_dict(checkpoint["model"])
     del checkpoint
 
     # ---------------------------------------------------------------------------
     # Run final evaluation on validation set with best model checkpoint
     # ---------------------------------------------------------------------------
-    #
-    # # TODO:
-    # result = validate(
-    #     model=td_model,
-    #     criterion=criterion,
-    #     data_loader=val_loader,
-    #     device=device,
-    #     config=config,
-    #     amp_context=amp_context,
-    # )
-    #
-    # for key, value in result.items():
-    #     if isinstance(value, plt.Figure):
-    #         value = Image(value)
-    #     aim_run.track(
-    #         value=value,
-    #         name=key,
-    #         epoch=global_state.epoch,
-    #         step=global_state.step,
-    #         context={"subset": "val"},
-    #     )
-    # plt.close("all")
+
+    output_dir = run_dir / "results" / "best"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # efficiency / rejection vs pT plots + ROC thresholds
+    result = evaluate(
+        model=td_model,
+        data_loader=val_loader,
+        device=device,
+        config=config,
+        amp_context=amp_context,
+        output_dir=output_dir,
+    )
+
+    aim_run.track(
+        value=result,
+        epoch=global_state.epoch,
+        step=global_state.step,
+        context={"subset": "best_val"},
+    )
+    plt.close("all")
+
+    # pick python native types to save results to json
+    serializable_result = {}
+    for key, value in result.items():
+        if is_json_serializable(value):
+            serializable_result[key] = value
+        elif isinstance(value, Tensor):
+            serializable_result[key] = value.tolist()
+        else:
+            _logger.debug(
+                f"Skipping non-serializable result key: {key} with type {type(value)}"
+            )
+
+    result_dir = run_dir / "results" / "best"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    with open(result_dir / "val.json", "w") as file:
+        json.dump(serializable_result, file, indent=4)
 
 
 @hydra.main(
