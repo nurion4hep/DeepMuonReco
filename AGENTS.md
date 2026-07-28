@@ -3,6 +3,7 @@
 ## Documentations
 Read the following documentation files for detailed information about the project if needed:
 
+- `docs/getting-started.md`: onboarding guide covering environment setup, the first training run, run outputs, and the reading order of the other documents.
 - `docs/overview.md`: provide an overview of the project
 - `docs/data/muon-id-producer.md` provides details about `MuonIdProducer`, which performs tracker muon reconstruction and provides labels for training and evaluation.
 - `docs/data/ntuplizer.md` describes DeepMuonReco ntuple production, branch contents, ROOT-to-HDF5 conversion, and dataset integration.

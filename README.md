@@ -1,53 +1,43 @@
 # Muonly
 
+Deep-learning preselection of inner tracker tracks for CMS Phase-2 tracker muon
+reconstruction. See [docs/overview.md](docs/overview.md) for the project goal
+and [docs/getting-started.md](docs/getting-started.md) for the full guide.
 
 ## Recipes
 
 ### Install dependencies
-If micromamba is not already installed on your system, you can install it easily using the following command:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) (Python >= 3.12):
 ```bash
-"${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+uv sync
 ```
-See more details at: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html
+Run all commands through `uv run`; no separate environment activation is needed.
 
-Then, create the environment using the provided `environment.yaml` file:
+### Sanity check
+Verify the full pipeline on a small subset before launching a real run:
 ```bash
-micromamba create -y -f ./environment.yaml
-```
-
-### Setup environment
-Source a shell script depending on your shell:
-- bash: `source setup.sh`
-- fish: `source setup.fish`
-
-### Training on local machine
-To run a training job with a sanity-check config on your local machine, use the following command:
-```bash
-./train.py debug=sanity-check
+uv run python scripts/train.py mode=sanity-check
 ```
 
-After the sanity check passes without any errors, you can start training the model by specifying your desired configurations in the prompt.
-For example:
+### Training
+Configuration is composed by Hydra from `config/`. Swap config groups
+(`model=`, `loss=`, `data=`, `paths=`, `mode=`) or override individual keys:
 ```bash
-./train.py model=latent_attention model.model_dim=128 optimizer.lr=0.0001 datamodule.batch_size=256
+uv run python scripts/train.py exp=my-study run=baseline \
+    model=latent_cross_attention model.model_dim=128 \
+    optim.lr=1e-4 optim.max_epochs=100 data_load.batch_size=256
 ```
-
-### Submit training job into a cluster
-```bash
-./submit.py -h
-```
-
-```bash
-./submit.py --debug sanity-check
-```
-
-```bash
-./submit.py --model latent_attention -a 'model.model_dim=128 optimizer.lr=0.0001 datamodule.batch_size=256'
-```
+Outputs are written to `logs/<exp>/<run>/`.
 
 ### Monitor training logs with Aim UI
-Open Aim UI
+The Aim repository is the `logs/` directory:
 ```bash
-aim up --port <PORT>
+uv run aim up --port <PORT>
 ```
-If you are working on a remote server, you need to set up port forwarding
+On a remote server, forward the port over SSH.
+
+### Predict and export
+```bash
+uv run python scripts/predict.py -c logs/<exp>/<run>/checkpoints/best.pt -s test
+uv run python scripts/export.py -c logs/<exp>/<run>/checkpoints/best.pt
+```
