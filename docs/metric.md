@@ -5,7 +5,7 @@
 The preselection model should avoid unnecessary tracker-track extrapolation
 while preserving tracks that would become final tracker muons. Its primary
 model-comparison metric is therefore the **true negative rate (TNR) at a
-minimum true positive rate (TPR) of 99.9%**, evaluated over all eligible
+minimum true positive rate (TPR) of 99.99%**, evaluated over all eligible
 tracker tracks.
 
 For this metric:
